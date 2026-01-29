@@ -28,12 +28,6 @@ Parameters:
     NoEcho: true
     MinLength: 8
     Description: 'Airflow admin password (min 8 chars)'
-  
-  AirflowBucket:
-    Type: String
-    NoEcho: true
-    MinLength: 8
-    Description: 'Airflow bucket for DAGs (min 8 chars)'
 
 Resources:
   VPC:
