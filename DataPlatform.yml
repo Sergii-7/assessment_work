@@ -1,0 +1,1234 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Complete Data Platform with S3, Glue, Redshift, Airflow on ECS, and Athena'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'data-platform'
+    Description: 'Name prefix for all resources'
+  
+  RedshiftMasterUsername:
+    Type: String
+    Default: 'admin'
+    Description: 'Redshift master username'
+  
+  RedshiftMasterPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: 'Redshift master password (min 8 chars)'
+  
+  AirflowAdminUsername:
+    Type: String
+    Default: 'admin'
+    Description: 'Airflow admin username'
+  
+  AirflowAdminPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: 'Airflow admin password (min 8 chars)'
+  
+  AirflowBucket:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: 'Airflow bucket for DAGs (min 8 chars)'
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: '10.0.0.0/16'
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-vpc'
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: '10.0.1.0/24'
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-subnet-1'
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: '10.0.2.0/24'
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-subnet-2'
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: '10.0.3.0/24'
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-subnet-1'
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: '10.0.4.0/24'
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-subnet-2'
+
+  PrivateSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: '10.0.5.0/24'
+      AvailabilityZone: !Select [2, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-subnet-3'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-igw'
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-rt'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # NAT Gateway for private subnets
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-rt'
+  
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PrivateSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetRouteTableAssociation3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet3
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ===== S3 BUCKETS =====
+  DataLakeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-data-lake-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  AirflowBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-airflow-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  AthenaBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-athena-results-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ===== IAM ROLES =====
+
+  GlueServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-glue-service-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: GlueS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${DataLakeBucket}/*'
+                  - !Sub 'arn:aws:s3:::${DataLakeBucket}'
+        - PolicyName: GlueRedshiftAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - redshift-serverless:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DeleteNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DescribeRouteTables
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeVpcEndpoints
+                  - ec2:DescribeVpcs
+                Resource: '*'
+        - PolicyName: GlueSecretsManagerFullAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:* 
+                Resource: '*'
+
+  RedshiftGlueAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - redshift.amazonaws.com
+                - redshift-serverless.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: GlueCatalogAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetTable
+                  - glue:GetPartitions
+                  - glue:GetTables
+                  - glue:GetDatabases
+                Resource: '*'
+        - PolicyName: RedshiftSecretsManagerFullAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:* 
+                Resource: '*'
+
+  RedshiftServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-redshift-service-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - redshift.amazonaws.com
+                - redshift-serverless.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RedshiftS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub 'arn:aws:s3:::${DataLakeBucket}/*'
+                  - !Sub 'arn:aws:s3:::${DataLakeBucket}'
+              - Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetTable
+                  - glue:GetPartitions
+                Resource: '*'
+        - PolicyName: RedshiftGlueDataCatalogAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:*
+                Resource: 
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog'
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/awsdatacatalog'
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/*'
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/*/*'
+
+  DataCatalogUserRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-datacatalog-user-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RedshiftDataCatalogAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - redshift-serverless:GetCredentials
+                  - redshift-serverless:GetWorkgroup
+                  - redshift-serverless:GetNamespace
+                  - redshift-data:*
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:GetPartition
+                  - glue:GetPartitions
+                  - glue:BatchGetPartition
+                  - glue:SearchTables
+                  - glue:GetCatalogImportStatus
+                  - glue:GetDataCatalogEncryptionSettings
+                Resource: '*'
+
+  AirflowExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-airflow-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: AirflowGlueAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:*
+                  - s3:*
+                  - athena:*
+                  - redshift:*
+                  - logs:*
+                Resource: '*'
+
+  AirflowTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-airflow-task-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AirflowDataPlatformAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:*
+                  - s3:*
+                  - athena:*
+                  - redshift:*
+                  - logs:*
+                  - ecs:*
+                Resource: '*'
+
+  # Role for DAG sync task
+  DAGSyncTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-dag-sync-task-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DAGSyncS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${AirflowBucket}/*'
+                  - !Sub 'arn:aws:s3:::${AirflowBucket}'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  # ===== GLUE RESOURCES =====
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub '${ProjectName}_database'
+        Description: 'Main database for data platform'
+
+  GlueCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub '${ProjectName}-s3-crawler'
+      Role: !GetAtt GlueServiceRole.Arn
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path: !Sub '${DataLakeBucket}/raw/'
+            Exclusions:
+              - '**/_temporary/**'
+              - '**/.spark-staging/**'
+              - '**/.DS_Store/**'
+          - Path: !Sub '${DataLakeBucket}/bronze/'
+            Exclusions:
+              - '**/_temporary/**'
+              - '**/.spark-staging/**'
+          - Path: !Sub '${DataLakeBucket}/silver/'
+            Exclusions:
+              - '**/_temporary/**'
+              - '**/.spark-staging/**'
+          - Path: !Sub '${DataLakeBucket}/gold/'
+            Exclusions:
+              - '**/_temporary/**'
+              - '**/.spark-staging/**'
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+      Configuration: |
+        {
+          "Version": 1.0,
+          "CrawlerOutput": {
+            "Partitions": { "AddOrUpdateBehavior": "InheritFromTable" },
+            "Tables": { "AddOrUpdateBehavior": "MergeNewColumns" }
+          }
+        }
+
+  # Additional Crawler for Redshift tables
+  RedshiftCrawler:
+    Type: AWS::Glue::Crawler
+    DependsOn: RedshiftServerlessWorkgroup
+    Properties:
+      Name: !Sub '${ProjectName}-redshift-crawler'
+      Role: !GetAtt GlueServiceRole.Arn
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        JdbcTargets:
+          - ConnectionName: !Ref RedshiftConnectionAZ1
+            Path: 'datawarehouse/%'
+            Exclusions:
+              - 'information_schema/%'
+              - 'pg_catalog/%'
+              - 'pg_toast/%'
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+        DeleteBehavior: LOG
+
+  GlueCrawlerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Glue Crawler SG
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  RedshiftSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Redshift SG
+      VpcId: !Ref VPC
+
+  # Glue Connection for Redshift
+  RedshiftConnectionAZ1:
+    Type: AWS::Glue::Connection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        Name: !Sub '${ProjectName}-redshift-connection-az1'
+        Description: 'Connection to Redshift Serverless'
+        ConnectionType: JDBC
+        ConnectionProperties:
+          JDBC_CONNECTION_URL: !Sub 
+            - 'jdbc:redshift://${RedshiftEndpoint}:5439/dev'
+            - RedshiftEndpoint: !GetAtt RedshiftServerlessWorkgroup.Workgroup.Endpoint.Address
+          USERNAME: !Ref RedshiftMasterUsername
+          PASSWORD: !Ref RedshiftMasterPassword
+        PhysicalConnectionRequirements:
+          SecurityGroupIdList:
+            - !Ref GlueCrawlerSecurityGroup
+          SubnetId: !Ref PrivateSubnet1
+  
+  RedshiftConnectionAZ2:
+    Type: AWS::Glue::Connection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        Name: !Sub '${ProjectName}-redshift-connection-az2'
+        Description: 'Connection to Redshift Serverless'
+        ConnectionType: JDBC
+        ConnectionProperties:
+          JDBC_CONNECTION_URL: !Sub 
+            - 'jdbc:redshift://${RedshiftEndpoint}:5439/dev'
+            - RedshiftEndpoint: !GetAtt RedshiftServerlessWorkgroup.Workgroup.Endpoint.Address
+          USERNAME: !Ref RedshiftMasterUsername
+          PASSWORD: !Ref RedshiftMasterPassword
+        PhysicalConnectionRequirements:
+          SecurityGroupIdList:
+            - !Ref GlueCrawlerSecurityGroup
+          SubnetId: !Ref PrivateSubnet2
+  
+  RedshiftConnectionAZ3:
+    Type: AWS::Glue::Connection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        Name: !Sub '${ProjectName}-redshift-connection-az3'
+        Description: 'Connection to Redshift Serverless'
+        ConnectionType: JDBC
+        ConnectionProperties:
+          JDBC_CONNECTION_URL: !Sub 
+            - 'jdbc:redshift://${RedshiftEndpoint}:5439/dev'
+            - RedshiftEndpoint: !GetAtt RedshiftServerlessWorkgroup.Workgroup.Endpoint.Address
+          USERNAME: !Ref RedshiftMasterUsername
+          PASSWORD: !Ref RedshiftMasterPassword
+        PhysicalConnectionRequirements:
+          SecurityGroupIdList:
+            - !Ref GlueCrawlerSecurityGroup
+          SubnetId: !Ref PrivateSubnet3
+
+  GlueToRedshiftEgressRule:
+    Type: AWS::EC2::SecurityGroupEgress
+    DependsOn: [GlueCrawlerSecurityGroup, RedshiftSecurityGroup]
+    Properties:
+      GroupId: !Ref GlueCrawlerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5439
+      ToPort: 5439
+      DestinationSecurityGroupId: !Ref RedshiftSecurityGroup
+
+  RedshiftIngressFromGlueRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    DependsOn: [GlueCrawlerSecurityGroup, RedshiftSecurityGroup]
+    Properties:
+      GroupId: !Ref RedshiftSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5439
+      ToPort: 5439
+      SourceSecurityGroupId: !Ref GlueCrawlerSecurityGroup
+
+  # ===== REDSHIFT SERVERLESS RESOURCES =====
+
+  RedshiftServerlessNamespace:
+    Type: AWS::RedshiftServerless::Namespace
+    Properties:
+      NamespaceName: !Sub '${ProjectName}-namespace'
+      AdminUsername: !Ref RedshiftMasterUsername
+      AdminUserPassword: !Ref RedshiftMasterPassword
+      IamRoles:
+        - !GetAtt RedshiftGlueAccessRole.Arn
+        - !GetAtt RedshiftServiceRole.Arn
+
+  RedshiftServerlessWorkgroup:
+    Type: AWS::RedshiftServerless::Workgroup
+    Properties:
+      WorkgroupName: !Sub '${ProjectName}-workgroup'
+      NamespaceName: !Ref RedshiftServerlessNamespace
+      BaseCapacity: 8  # Redshift Processing Units (RPUs) - minimum is 8
+      PubliclyAccessible: false
+      EnhancedVpcRouting: true
+      SecurityGroupIds:
+        - !Ref RedshiftSecurityGroup
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+
+  # ===== ATHENA RESOURCES =====
+  AthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub '${ProjectName}-workgroup'
+      Description: 'Primary workgroup for data platform'
+      State: ENABLED
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub 's3://${AthenaBucket}/query-results/'
+        EnforceWorkGroupConfiguration: false
+
+  # ===== ECS CLUSTER FOR AIRFLOW =====
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${ProjectName}-airflow-cluster'
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+
+  # Base security group for Airflow (no self-references)
+  AirflowSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for Airflow ECS tasks'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: '0.0.0.0/0'
+
+  # Database security group (separate from Airflow SG)
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for RDS database'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref AirflowSecurityGroup
+
+  # ===== RDS POSTGRES FOR AIRFLOW METADATA =====
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: 'Subnet group for Airflow metadata database'
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+
+  AirflowDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub '${ProjectName}-airflow-db'
+      DBInstanceClass: 'db.t3.micro'
+      Engine: 'postgres'
+      EngineVersion: '17.4'
+      MasterUsername: 'airflow'
+      MasterUserPassword: !Ref AirflowAdminPassword
+      AllocatedStorage: 20
+      DBName: 'airflow'
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      PubliclyAccessible: false
+
+  # ===== AIRFLOW ECS TASK DEFINITIONS =====
+  AirflowWebserverTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-airflow-webserver'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt AirflowExecutionRole.Arn
+      TaskRoleArn: !GetAtt AirflowTaskRole.Arn
+      ContainerDefinitions:
+        - Name: airflow-webserver
+          Image: 'apache/airflow:2.8.1'
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          Environment:
+            - Name: AIRFLOW__CORE__EXECUTOR
+              Value: LocalExecutor
+            - Name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
+              Value: !Sub 'postgresql://airflow:${AirflowAdminPassword}@${AirflowDatabase.Endpoint.Address}:5432/airflow'
+            - Name: AIRFLOW__CORE__FERNET_KEY
+              Value: 'YlCImzjge_TeZc8jGyCNFAeET9hGIkUEBF2xYE4UeXo='
+            - Name: AIRFLOW__WEBSERVER__SECRET_KEY
+              Value: 'd2def9c5d35ac1a02f112e080f2b130c27323da0dda21f9a1f875428cd6f'
+            - Name: AIRFLOW__CORE__DAGS_FOLDER
+              Value: '/opt/airflow/dags'
+            - Name: AIRFLOW__CORE__LOAD_EXAMPLES
+              Value: 'True'
+            - Name: _AIRFLOW_WWW_USER_USERNAME
+              Value: !Ref AirflowAdminUsername
+            - Name: _AIRFLOW_WWW_USER_PASSWORD
+              Value: !Ref AirflowAdminPassword
+            - Name: S3_CONFIG_BUCKET
+              Value: !Ref AirflowBucket
+          MountPoints:
+            - SourceVolume: airflow-dags
+              ContainerPath: /opt/airflow/dags
+            - SourceVolume: airflow-config
+              ContainerPath: /opt/airflow/config
+          Command:
+            - bash
+            - -c
+            - |
+              echo "Starting Airflow Webserver..."
+              
+              # Download custom airflow.cfg if it exists
+              if aws s3 ls s3://$S3_CONFIG_BUCKET/config/airflow.cfg; then
+                echo "Found custom airflow.cfg in S3, downloading..."
+                aws s3 cp s3://$S3_CONFIG_BUCKET/config/airflow.cfg /opt/airflow/config/airflow.cfg
+                export AIRFLOW_CONFIG=/opt/airflow/config/airflow.cfg
+                echo "Using custom config: $AIRFLOW_CONFIG"
+              else
+                echo "No custom airflow.cfg found, using defaults with environment variables"
+              fi
+              
+              # Download custom webserver_config.py if it exists
+              if aws s3 ls s3://$S3_CONFIG_BUCKET/config/webserver_config.py; then
+                echo "Found custom webserver_config.py in S3, downloading..."
+                aws s3 cp s3://$S3_CONFIG_BUCKET/config/webserver_config.py /opt/airflow/config/webserver_config.py
+                export AIRFLOW__WEBSERVER__CONFIG_FILE=/opt/airflow/config/webserver_config.py
+              fi
+
+              # Initialize the database
+              airflow db init
+              
+              # Initialize database (only if not already done)
+              airflow db check
+              
+              # Create admin user (only if not exists)
+              airflow users list | grep -q ${_AIRFLOW_WWW_USER_USERNAME} || \
+              airflow users create \
+                --username ${_AIRFLOW_WWW_USER_USERNAME} \
+                --firstname Admin \
+                --lastname User \
+                --role Admin \
+                --email admin@example.com \
+                --password ${_AIRFLOW_WWW_USER_PASSWORD}
+              
+              # Start webserver
+              airflow webserver
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref AirflowLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: webserver
+      Volumes:
+        - Name: airflow-dags
+          EFSVolumeConfiguration:
+            FileSystemId: !Ref AirflowEFS
+        - Name: airflow-config
+          EFSVolumeConfiguration:
+            FileSystemId: !Ref AirflowConfigEFS
+
+  AirflowSchedulerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-airflow-scheduler'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt AirflowExecutionRole.Arn
+      TaskRoleArn: !GetAtt AirflowTaskRole.Arn
+      ContainerDefinitions:
+        - Name: airflow-scheduler
+          Image: 'apache/airflow:2.8.1'
+          Essential: true
+          Environment:
+            - Name: AIRFLOW__CORE__EXECUTOR
+              Value: LocalExecutor
+            - Name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
+              Value: !Sub 'postgresql://airflow:${AirflowAdminPassword}@${AirflowDatabase.Endpoint.Address}:5432/airflow'
+            - Name: AIRFLOW__CORE__FERNET_KEY
+              Value: 'YlCImzjge_TeZc8jGyCNFAeET9hGIkUEBF2xYE4UeXo='
+            - Name: AIRFLOW__CORE__DAGS_FOLDER
+              Value: '/opt/airflow/dags'
+            - Name: AIRFLOW__CORE__LOAD_EXAMPLES
+              Value: 'False'
+            - Name: S3_CONFIG_BUCKET
+              Value: !Ref AirflowBucket
+          MountPoints:
+            - SourceVolume: airflow-dags
+              ContainerPath: /opt/airflow/dags
+            - SourceVolume: airflow-config
+              ContainerPath: /opt/airflow/config
+          Command:
+            - bash
+            - -c
+            - |
+              echo "Starting Airflow Scheduler..."
+              
+              # Download custom airflow.cfg if it exists
+              if aws s3 ls s3://$S3_CONFIG_BUCKET/config/airflow.cfg; then
+                echo "Found custom airflow.cfg in S3, downloading..."
+                aws s3 cp s3://$S3_CONFIG_BUCKET/config/airflow.cfg /opt/airflow/config/airflow.cfg
+                export AIRFLOW_CONFIG=/opt/airflow/config/airflow.cfg
+                echo "Using custom config: $AIRFLOW_CONFIG"
+              else
+                echo "No custom airflow.cfg found, using defaults with environment variables"
+              fi
+              
+              # Start scheduler
+              airflow scheduler
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref AirflowLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: scheduler
+      Volumes:
+        - Name: airflow-dags
+          EFSVolumeConfiguration:
+            FileSystemId: !Ref AirflowEFS
+        - Name: airflow-config
+          EFSVolumeConfiguration:
+            FileSystemId: !Ref AirflowConfigEFS
+
+  # ===== EFS FOR AIRFLOW DAGS =====
+  AirflowEFS:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-airflow-dags'
+
+  AirflowEFSMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref AirflowEFS
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  AirflowEFSMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref AirflowEFS
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  AirflowEFSMountTarget3:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref AirflowEFS
+      SubnetId: !Ref PrivateSubnet3
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+  
+  AirflowConfigEFS:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-airflow-dags'
+
+  AirflowConfigEFSMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref AirflowConfigEFS
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  AirflowConfigEFSMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref AirflowConfigEFS
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  AirflowConfigEFSMountTarget3:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref AirflowConfigEFS
+      SubnetId: !Ref PrivateSubnet3
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for EFS'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref AirflowSecurityGroup
+
+  # ===== DAG SYNC TASK DEFINITION =====
+  DAGSyncTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-dag-sync'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 256
+      Memory: 512
+      ExecutionRoleArn: !GetAtt AirflowExecutionRole.Arn
+      TaskRoleArn: !GetAtt DAGSyncTaskRole.Arn
+      ContainerDefinitions:
+        - Name: dag-sync
+          Image: 'amazon/aws-cli:latest'
+          Essential: true
+          Environment:
+            - Name: S3_BUCKET
+              Value: !Ref AirflowBucket
+            - Name: S3_PREFIX
+              Value: 'dags/'
+            - Name: EFS_MOUNT_PATH
+              Value: '/opt/airflow/dags'
+          MountPoints:
+            - SourceVolume: airflow-dags
+              ContainerPath: /opt/airflow/dags
+          Command:
+            - sh
+            - -c
+            - |
+              echo "Starting DAG sync from S3 to EFS..."
+              echo "S3 Bucket: $S3_BUCKET"
+              echo "S3 Prefix: $S3_PREFIX"
+              echo "EFS Mount: $EFS_MOUNT_PATH"
+              
+              # Create dags directory if it doesn't exist
+              mkdir -p $EFS_MOUNT_PATH
+              
+              # Sync DAGs from S3 to EFS
+              aws s3 sync s3://$S3_BUCKET/$S3_PREFIX $EFS_MOUNT_PATH --delete --exact-timestamps
+              
+              echo "DAG sync completed successfully"
+              
+              # List files for verification
+              echo "Files in EFS DAGs directory:"
+              ls -la $EFS_MOUNT_PATH
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref DAGSyncLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: dag-sync
+      Volumes:
+        - Name: airflow-dags
+          EFSVolumeConfiguration:
+            FileSystemId: !Ref AirflowEFS
+        - Name: airflow-config
+          EFSVolumeConfiguration:
+            FileSystemId: !Ref AirflowConfigEFS
+
+  # ===== EVENTBRIDGE RULE FOR SCHEDULED DAG SYNC =====
+  DAGSyncScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ProjectName}-dag-sync-schedule'
+      Description: 'Trigger DAG sync every 5 minutes'
+      ScheduleExpression: 'rate(5 minutes)'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ECSCluster.Arn
+          Id: 'DAGSyncTarget'
+          RoleArn: !GetAtt EventBridgeExecutionRole.Arn
+          EcsParameters:
+            TaskDefinitionArn: !Ref DAGSyncTaskDefinition
+            LaunchType: FARGATE
+            NetworkConfiguration:
+              AwsVpcConfiguration:
+                AssignPublicIp: ENABLED
+                SecurityGroups:
+                  - !Ref AirflowSecurityGroup
+                Subnets:
+                  - !Ref PublicSubnet1
+                  - !Ref PublicSubnet2
+
+  # Role for EventBridge to run ECS tasks
+  EventBridgeExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-eventbridge-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EventBridgeECSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:RunTask
+                Resource: !Ref DAGSyncTaskDefinition
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  - !GetAtt AirflowExecutionRole.Arn
+                  - !GetAtt DAGSyncTaskRole.Arn
+
+  # ===== ECS SERVICES =====
+  AirflowWebserverService:
+    Type: AWS::ECS::Service
+    DependsOn: AirflowDatabase
+    Properties:
+      ServiceName: !Sub '${ProjectName}-airflow-webserver'
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref AirflowWebserverTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref AirflowSecurityGroup
+          Subnets:
+            - !Ref PublicSubnet1
+            - !Ref PublicSubnet2
+      LoadBalancers:
+        - ContainerName: airflow-webserver
+          ContainerPort: 8080
+          TargetGroupArn: !Ref AirflowTargetGroup
+
+  AirflowSchedulerService:
+    Type: AWS::ECS::Service
+    DependsOn: AirflowDatabase
+    Properties:
+      ServiceName: !Sub '${ProjectName}-airflow-scheduler'
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref AirflowSchedulerTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref AirflowSecurityGroup
+          Subnets:
+            - !Ref PublicSubnet1
+            - !Ref PublicSubnet2
+
+  # ===== APPLICATION LOAD BALANCER =====
+  AirflowALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-airflow-alb'
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for ALB'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: '0.0.0.0/0'
+
+  AirflowTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ProjectName}-airflow-tg'
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VPC
+      HealthCheckPath: '/health'
+      HealthCheckProtocol: HTTP
+
+  AirflowListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AirflowTargetGroup
+      LoadBalancerArn: !Ref AirflowALB
+      Port: 80
+      Protocol: HTTP
+
+  # ===== CLOUDWATCH LOGS =====
+  AirflowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/ecs/${ProjectName}-airflow'
+      RetentionInDays: 14
+  
+  DAGSyncLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/ecs/${ProjectName}-dag-sync'
+      RetentionInDays: 14
+
+  S3LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/s3/${ProjectName}'
+      RetentionInDays: 14
+
+Outputs:
+  DataLakeBucketName:
+    Description: 'S3 Data Lake Bucket Name'
+    Value: !Ref DataLakeBucket
+    Export:
+      Name: !Sub '${ProjectName}-data-lake-bucket'
+
+  AthenaBucketName:
+    Description: 'S3 Athena Results Bucket Name'
+    Value: !Ref AthenaBucket
+    Export:
+      Name: !Sub '${ProjectName}-athena-bucket'
+
+  GlueDatabaseName:
+    Description: 'Glue Database Name'
+    Value: !Ref GlueDatabase
+    Export:
+      Name: !Sub '${ProjectName}-database'
+
+  RedshiftServerlessEndpoint:
+    Description: 'Redshift Serverless Workgroup Endpoint'
+    Value: !GetAtt RedshiftServerlessWorkgroup.Workgroup.Endpoint.Address
+    Export:
+      Name: !Sub '${ProjectName}-redshift-endpoint'
+
+  AirflowWebUI:
+    Description: 'Airflow Web UI URL'
+    Value: !Sub 'http://${AirflowALB.DNSName}'
+    Export:
+      Name: !Sub '${ProjectName}-airflow-url'
+
+  AthenaWorkGroupName:
+    Description: 'Athena WorkGroup Name'
+    Value: !Ref AthenaWorkGroup
+    Export:
+      Name: !Sub '${ProjectName}-athena-workgroup'
+
+  VPCId:
+    Description: 'VPC ID'
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${ProjectName}-vpc-id'

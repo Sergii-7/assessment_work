@@ -1,0 +1,1 @@
+[{"foods": [{"fdcId": 1, "description": "Apple", "dataType": "Foundation", "foodCategory": "Fruits", "publishedDate": "2022-01-01", "foodNutrients": [{"nutrientName": "Vitamin C", "value": 100, "unitName": "mg"}, {"nutrientName": "Fiber", "value": 5, "unitName": "g"}]}]}]
