@@ -31,10 +31,10 @@
 2. Архітектура платформи доступна в файлі `DataPatforn.yml`. Необхідно виконати деплой через сервіс AWS CloudFormation:
 ```bash
 aws cloudformation create-stack \                                                           
-  --stack-name <your_user>-data-platform \
+  --stack-name sergii-data-platform \
   --template-url file://DataPlatform.yaml \
   --parameters \
-    ParameterKey=ProjectName, ParameterValue=<your-user>-data-platform \
+    ParameterKey=ProjectName, ParameterValue=sergii-data-platform \
     ParameterKey=RedshiftMasterUsername, ParameterValue=admin \
     ParameterKey=RedshiftMasterPassword, ParameterValue=<redshift_password> \
     ParameterKey=AirflowAdminUsername, ParameterValue=admin \
@@ -43,7 +43,7 @@ aws cloudformation create-stack \
   --capabilities CAPABILITY_NAMED_IAM \
   --region us-east-1
 ```
-Моніторити деплой можете в [консолі AWS Cloudformation](https://us-east-1.console.aws.amazon.com/cloudformation/home?region=us-east-1)
+Моніторити деплой можете в [консолі AWS Cloudformation](https://eu-north-1.console.aws.amazon.com/cloudformation/home?region=eu-north-1)
 3. Після деплою перейдіть у вкладку `Resources` та знайдіть `DataLakeBucket`. Скопіюйте його назву та перемістіть дані в директорію `raw` цього бакету:
 ```bash
 aws s3 cp --recursive data s3://<DataLakeBucketName>/raw
