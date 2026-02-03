@@ -489,7 +489,7 @@ aws glue get-job-run \
 #### status FAILED - треба додати ROLE GlueReadAirflowBucketScripts
 #### додали роль в IAM користувачу sergii
 
-![images/26](/26.png)
+![images/26](images/26.png)
 
 #### знову пере-запускаємо job
 ```
