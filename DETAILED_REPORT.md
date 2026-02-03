@@ -22,7 +22,7 @@ echo "AIRFLOW_PASSWORD=${AIRFLOW_PASSWORD:0:4}****"
 
 #### Створити сервісну роль для ECS (якщо її ще немає)
 ```
-aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com --region us-east-1
+aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com --region eu-north-1
 ```
 
 ### Налаштувати файл конфігурації 'DataPlatform.yml' з правильними значеннями параметрів перед запуском цього скрипту
