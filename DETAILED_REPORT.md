@@ -9,8 +9,8 @@ aws configure get region
 #### Встановити змінні оточення для проекту
 ```
 export PROJECT_NAME="sergii-data-platform"
-export REDSHIFT_PASSWORD=bsm6067SergiiRedshift
-export AIRFLOW_PASSWORD=bsm6067SergiiAirflow
+export REDSHIFT_PASSWORD=superSecretRedshiftPassw0rd
+export AIRFLOW_PASSWORD=superSecretAirflowPassw0rd
 ```
 
 #### Показати змінні (паролі частково приховані)
@@ -36,9 +36,9 @@ aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com --region
 ### Введи параметри:
 #### ProjectName: sergii-data-platform
 #### RedshiftMasterUsername: admin
-#### RedshiftMasterPassword: bsm6067SergiiRedshift
+#### RedshiftMasterPassword: superSecretRedshiftPassw0rd
 #### AirflowAdminUsername: admin
-#### AirflowAdminPassword: bsm6067SergiiAirflow
+#### AirflowAdminPassword: superSecretAirflowPassw0rd
 
 #### Натисни 'Next', налаштуй опції за потреби і натисни 'Create stack'
 #### Дочекайся завершення створення стеку
